@@ -2,5 +2,5 @@
 // „anon / publishable“ ключът е предназначен да бъде публичен — данните се пазят от правилата в базата.
 window.BEL_CONFIG = {
   supabaseUrl: "https://jngdiltzrwaxjnuuvlal.supabase.co",      // напр. "https://abcdefgh.supabase.co"
-  supabaseAnonKey: ""   // дългият ключ, започващ с "eyJ..." или "sb_publishable_..."
+  supabaseAnonKey: "sb_publishable_CpYBtfg9bH9x_AAzGA_CtA_TNMtnjo1"   // дългият ключ, започващ с "eyJ..." или "sb_publishable_..."
 };
