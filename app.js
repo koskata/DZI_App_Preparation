@@ -57,8 +57,12 @@
       const outCircle = WORKS.filter((x) => x.theme !== w.theme).map((x) => `„${x.title}“`);
       add(`circle:${w.id}`, w, `Коя творба е от тематичния кръг „${themeName(w.theme)}“?`, distinct(T, outCircle), `${T} е в кръга „${themeName(w.theme)}“.`);
       add(`pair:${w.id}`, w, "Коя двойка автор — творба е вярна?", distinct(`${w.author} — ${T}`, WORKS.filter((x) => x.author !== w.author).map((x) => `${w.author} — „${x.title}“`)), `${T} е от ${w.author}.`);
+      const norm = (x) => x.toLowerCase().replace(/[^а-яa-zѝ ]+/g, " ");
+      const names = (w.characters || []).flatMap((c) => ((c.match(/<b>([^<]+)<\/b>/) || [])[1] || "").split(/[\s()]+/)).filter((x) => x.length > 3 && !/^(дядо|баба|старата|децата|разказвачът|бащата|майката)$/i.test(x)).map(norm);
       (w.quotes || []).forEach((qt, i) => {
         const line = qt.split("\n").slice(0, 2).join(" / ");
+        const nl = norm(line);
+        if (nl.includes(norm(w.title).trim()) || names.some((n) => nl.includes(n.trim()))) return;
         add(`qw:${w.id}:${i}`, w, `От коя творба е цитатът: „${line}“?`, distinct(T, titles), `Цитатът е от ${T} (${w.author}).`);
         add(`qa:${w.id}:${i}`, w, `Чии са думите: „${line}“?`, distinct(w.author, authors), `${w.author}, ${T}.`);
       });
@@ -377,11 +381,12 @@
       refill();
       if (i >= qs.length) return finish();
       const q = qs[i];
+      const hideSrc = revealsAnswer(q);
       host.innerHTML = `
         <div class="quiz">
           <div class="quiz-top"><span class="eyebrow">${esc(title || "Тест")}</span><span class="count">${endless ? `${score} верни от ${i}` : `${i + 1} / ${qs.length}`}</span></div>
           <div class="bar"><span style="width:${endless ? (i ? (score / i) * 100 : 0) : (i / qs.length) * 100}%"></span></div>
-          <p class="q-src">${esc(q.src || "")}</p>
+          <p class="q-src"${hideSrc ? " hidden" : ""}>${esc(q.src || "")}</p>
           <h3 class="q-text">${esc(q.q)}</h3>
           <div class="opts">${q.order.map((k, n) => `<button class="opt" data-k="${k}"><span class="letter">${"АБВГД"[n]}</span><span>${esc(q.o[k])}</span></button>`).join("")}</div>
           <div class="fb" hidden></div>
@@ -403,6 +408,7 @@
       const fb = $(".fb", host); fb.hidden = false;
       fb.className = "fb " + (ok ? "ok" : "no");
       fb.innerHTML = `<b>${ok ? "Вярно." : "Грешно."}</b> ${esc(q.e || "")}`;
+      const src = $(".q-src", host); if (src) src.hidden = false;
       $("[data-act=next]", host).hidden = false;
       $("[data-act=next]", host).focus();
     }
@@ -428,6 +434,13 @@
       $("[data-act=again]", host).onclick = () => onDone ? onDone() : render();
     }
     show();
+  }
+  // Does the "Author — „Title“" label above a question give the answer away?
+  function revealsAnswer(q) {
+    const w = q.workId && workById(q.workId);
+    if (!w) return false;
+    const surname = w.author.split(" ").pop();
+    return q.o.some((o) => o.includes(w.title) || o.includes(w.author) || o.includes(surname));
   }
   function reviewList(items) {
     return `<ol class="review">${items.map((l) => `<li class="${l.c === l.a ? "is-ok" : "is-no"}"><p class="q-src">${esc(l.src || "")}</p><p><b>${esc(l.q)}</b></p>${l.c === l.a ? `<p class="red-pen"><span>✓ ${esc(l.o[l.a])}</span></p>` : `<p class="red-pen">${l.c != null ? `<s>${esc(l.o[l.c])}</s> → ` : `<i class="muted">без отговор</i> → `}<span>${esc(l.o[l.a])}</span></p>`}<p class="muted">${esc(l.e || "")}</p>${l.w && l.c !== l.a ? `<a href="#work-${l.w}" data-go="work" data-arg="${l.w}">Прочети за творбата</a>` : ""}</li>`).join("")}</ol>`;
@@ -788,7 +801,7 @@ ${item.key ? "ОПОРНИ ТОЧКИ ЗА ВЕРЕН ОТГОВОР: " + item.k
         <h2>Пробен изпит</h2>
         <p class="muted">Отговори на всичко и натисни „Предай“ най-долу. Задачите с избираем отговор се проверяват веднага, а свободните отговори — с AI проверка.</p>
         <h3 class="part">Част 1 · Избираем отговор</h3>
-        ${mcq.map((q) => { n++; return `<fieldset class="mq" data-i="${n - 1}"><legend><span class="num">${n}.</span> ${esc(q.q)} <span class="q-src">${esc(q.src)}</span></legend>${q.order.map((k, j) => `<label class="mopt"><input type="radio" name="m${n - 1}" value="${k}"><span class="letter">${"АБВГД"[j]}</span> ${esc(q.o[k])}</label>`).join("")}</fieldset>`; }).join("")}
+        ${mcq.map((q) => { n++; return `<fieldset class="mq" data-i="${n - 1}"><legend><span class="num">${n}.</span> ${esc(q.q)} <span class="q-src" hidden>${esc(q.src)}</span></legend>${q.order.map((k, j) => `<label class="mopt"><input type="radio" name="m${n - 1}" value="${k}"><span class="letter">${"АБВГД"[j]}</span> ${esc(q.o[k])}</label>`).join("")}</fieldset>`; }).join("")}
         <h3 class="part">Част 2 · Редактиране</h3>
         ${edits.map((t, i) => { n++; return `<div class="oq"><p><span class="num">${n}.</span> Препишете изречението, като поправите грешките.</p><blockquote>${esc(t.text)}</blockquote><textarea name="e${i}" rows="2"></textarea></div>`; }).join("")}
         <h3 class="part">Част 3 · Свободен отговор</h3>
@@ -811,6 +824,7 @@ ${item.key ? "ОПОРНИ ТОЧКИ ЗА ВЕРЕН ОТГОВОР: " + item.k
         const fs = f.querySelector(`fieldset[data-i="${i}"]`);
         const ok = v && +v.value === q.a; if (ok) c++;
         if (v) record(q, ok);
+        const qs2 = fs.querySelector(".q-src"); if (qs2) qs2.hidden = false;
         $$("label", fs).forEach((l) => { const k = +l.querySelector("input").value; if (k === q.a) l.classList.add("right"); else if (v && k === +v.value) l.classList.add("wrong"); });
       });
       const res = $("#mock-res");
