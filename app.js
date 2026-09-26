@@ -9,7 +9,7 @@
   const pick = (a) => a[Math.floor(Math.random() * a.length)];
   const store = {
     get(k, d) { try { const v = localStorage.getItem("bel." + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
-    set(k, v) { try { localStorage.setItem("bel." + k, JSON.stringify(v)); } catch {} }
+    set(k, v) { try { localStorage.setItem("bel." + k, JSON.stringify(v)); } catch {} if (window.__belSyncDirty && ["notes", "stats", "writeDraft"].includes(k)) window.__belSyncDirty(k); }
   };
   const WORKS = window.WORKS || [];
   const THEMES = window.THEMES || [];
@@ -86,11 +86,8 @@
     entry.id = "h" + Date.now() + Math.floor(Math.random() * 1000);
     entry.d = Date.now();
     h.push(entry);
-    let list = h.slice(-400);
-    for (let tries = 0; tries < 8; tries++) {
-      try { localStorage.setItem("bel.history", JSON.stringify(list)); return entry.id; }
-      catch { list = list.slice(Math.ceil(list.length * 0.15)); }
-    }
+    saveHistoryList(h);
+    sync.entry(entry);
     return entry.id;
   }
   function historyRows(types, limit = 8, empty = "Все още няма записи.") {
@@ -170,7 +167,24 @@
     cancelled: "Проверката е спряна."
   }[e && e.code] || "Проверката не успя. Опитай пак след малко.");
 
+  let lastPrompt = "";
+  // Outside claude.ai there is no built-in check: offer the same instructions to paste into any AI chat.
+  function copyForAI(intro) {
+    const chat = lastPrompt.split(/Отговори само с JSON/)[0].trim() + "\n\nОтговори на ясен български текст, подредено: оценка, какво е добре, какво липсва или е неточно, езикови грешки (грешно → правилно, с правилото) и конкретни съвети.";
+    return `<div class="copyai"><p><b>${esc(intro)}</b> Натисни бутона, отвори ChatGPT, Gemini или Claude и постави текста — ще получиш проверка по същите критерии.</p>
+      <div class="row"><button class="btn primary" type="button" data-copy-ai>Копирай за проверка с AI</button><span class="muted small" data-copy-state></span></div>
+      <textarea class="copy-src" rows="6" readonly hidden>${esc(chat)}</textarea></div>`;
+  }
+  document.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-copy-ai]"); if (!b) return;
+    const box = b.closest(".copyai"), ta = $(".copy-src", box), st = $("[data-copy-state]", box);
+    try { await navigator.clipboard.writeText(ta.value); st.textContent = "Копирано. Постави го в AI чата."; }
+    catch { ta.hidden = false; ta.select(); st.textContent = "Маркирано е — копирай го с Ctrl+C / Cmd+C."; }
+  });
+  const offline = (e) => e && (e.code === "unavailable");
+
   async function askJSON(prompt, opts = {}) {
+    lastPrompt = prompt;
     const s = await getSample();
     if (!s) throw { code: "unavailable" };
     return s.json(prompt, opts);
@@ -186,8 +200,151 @@
   }
   const TEACHER = "Ти си опитен учител по български език и литература, който подготвя ученичка за държавния зрелостен изпит (ДЗИ) по БЕЛ в 12 клас в България. Пиши на правилен български книжовен език. Бъди конкретен, насърчаващ и честен. Не измисляй факти за творбите — ако не си сигурен, не твърди.";
 
+  // ---------- account & sync (Supabase; active only when config.js is filled in) ----------
+  const SYNC_KEYS = ["notes", "stats", "writeDraft"];
+  function saveHistoryList(list) {
+    list = list.slice(-400);
+    for (let tries = 0; tries < 8; tries++) {
+      try { localStorage.setItem("bel.history", JSON.stringify(list)); return; }
+      catch { list = list.slice(Math.ceil(list.length * 0.15)); }
+    }
+  }
+  const sync = (() => {
+    const cfg = window.BEL_CONFIG || {};
+    const on = !!(window.supabase && cfg.supabaseUrl && cfg.supabaseAnonKey);
+    const sb = on ? window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } }) : null;
+    let user = null, state = "idle", lastSync = store.get("lastSync", null), kvTimer = null, pulling = false;
+    const q = (k) => store.get(k, []);
+    const addQ = (k, id) => { const a = q(k); if (!a.includes(id)) { a.push(id); store.set(k, a); } };
+    const rowOf = (e) => ({ user_id: user.id, id: e.id, d: e.d, t: e.t, title: String(e.title || "").slice(0, 300), score: e.score ?? null, max: e.max ?? null, grade: e.grade ? String(e.grade) : null, data: e });
+    function paint() {
+      const txt = !on ? "" : !user ? "Не си влязла — данните са само на това устройство" : state === "busy" ? "Синхронизиране…" : state === "error" ? "Няма връзка — ще синхронизирам по-късно" : `Синхронизирано${lastSync ? " · " + new Date(lastSync).toLocaleTimeString("bg-BG", { hour: "2-digit", minute: "2-digit" }) : ""}`;
+      $$("[data-sync-status]").forEach((el) => { el.textContent = txt; el.dataset.state = !user ? "off" : state; });
+      document.body.dataset.sync = !on ? "none" : user ? "in" : "out";
+    }
+    const done = () => { state = "ok"; lastSync = Date.now(); store.set("lastSync", lastSync); paint(); };
+    const fail = () => { state = "error"; paint(); };
+    async function flushEntries() {
+      if (!user) return;
+      const del = q("syncDeleted");
+      if (del.length) { const { error } = await sb.from("entries").delete().in("id", del); if (error) throw error; store.set("syncDeleted", []); }
+      const ids = q("syncPending"); if (!ids.length) return;
+      const rows = getHistory().filter((x) => ids.includes(x.id)).map(rowOf);
+      if (rows.length) { const { error } = await sb.from("entries").upsert(rows, { onConflict: "user_id,id" }); if (error) throw error; }
+      store.set("syncPending", q("syncPending").filter((id) => !ids.includes(id)));
+    }
+    async function flushKV() {
+      if (!user) return;
+      const keys = q("syncDirty"); if (!keys.length) return;
+      const rows = keys.map((k) => ({ user_id: user.id, key: k, value: store.get(k, null), updated_at: new Date().toISOString() }));
+      const { error } = await sb.from("kv").upsert(rows, { onConflict: "user_id,key" }); if (error) throw error;
+      store.set("syncDirty", q("syncDirty").filter((k) => !keys.includes(k)));
+    }
+    async function flush() { if (!user) return; state = "busy"; paint(); try { await flushEntries(); await flushKV(); done(); } catch { fail(); } }
+    async function pull() {
+      if (!user || pulling) return; pulling = true; state = "busy"; paint();
+      try {
+        const { data: kv, error: e1 } = await sb.from("kv").select("key,value"); if (e1) throw e1;
+        const R = Object.fromEntries((kv || []).map((r) => [r.key, r.value]));
+        if (R.notes) { const m = new Map(); for (const n of [...R.notes, ...store.get("notes", [])]) { const o = m.get(n.id); if (!o || (n.updated || 0) >= (o.updated || 0)) m.set(n.id, n); } localStorage.setItem("bel.notes", JSON.stringify([...m.values()].sort((a, b) => (b.updated || 0) - (a.updated || 0)))); }
+        if (R.stats && (R.stats.answered || 0) > (stats().answered || 0)) localStorage.setItem("bel.stats", JSON.stringify(R.stats));
+        const wd = store.get("writeDraft", null);
+        if (R.writeDraft && (!wd || !(wd.text || "").trim())) localStorage.setItem("bel.writeDraft", JSON.stringify(R.writeDraft));
+        const { data: rows, error: e2 } = await sb.from("entries").select("id,data").order("d", { ascending: false }).limit(400); if (e2) throw e2;
+        const remote = new Set((rows || []).map((r) => r.id)), del = new Set(q("syncDeleted"));
+        const local = getHistory();
+        const m = new Map(local.map((x) => [x.id, x]));
+        for (const r of rows || []) if (!del.has(r.id) && !m.has(r.id)) m.set(r.id, r.data);
+        saveHistoryList([...m.values()].sort((a, b) => a.d - b.d));
+        const missing = local.filter((x) => !remote.has(x.id)).map((x) => x.id);
+        store.set("syncPending", [...new Set([...q("syncPending"), ...missing])]);
+        store.set("syncDirty", [...SYNC_KEYS]);
+        await flushEntries(); await flushKV();
+        done(); render();
+      } catch { fail(); } finally { pulling = false; }
+    }
+    async function start() {
+      paint(); if (!on) return;
+      const { data } = await sb.auth.getSession();
+      user = data.session ? data.session.user : null; paint();
+      if (user) pull();
+      sb.auth.onAuthStateChange((_ev, session) => {
+        const u = session ? session.user : null; const changed = (u && u.id) !== (user && user.id);
+        user = u; paint(); if (u && changed) pull(); if (changed) render();
+      });
+      window.addEventListener("online", flush);
+      setInterval(() => { if (user && (q("syncPending").length || q("syncDirty").length || q("syncDeleted").length)) flush(); }, 60000);
+    }
+    return {
+      get on() { return on; }, get user() { return user; }, sb, start, pull, paint,
+      entry(e) { if (!on) return; addQ("syncPending", e.id); flush(); },
+      remove(id) { if (!on) return; store.set("syncPending", q("syncPending").filter((x) => x !== id)); addQ("syncDeleted", id); flush(); },
+      dirty(k) { if (!on) return; addQ("syncDirty", k); clearTimeout(kvTimer); kvTimer = setTimeout(flush, 1500); },
+      pushAll() { if (!on) return; store.set("syncPending", getHistory().map((x) => x.id)); store.set("syncDirty", [...SYNC_KEYS]); flush(); },
+      async listAll() {
+        const out = [];
+        for (let from = 0; from < 20000; from += 1000) {
+          const { data, error } = await sb.from("entries").select("id,d,t,title,score,max,grade").order("d", { ascending: true }).range(from, from + 999);
+          if (error) throw error; out.push(...data); if (data.length < 1000) break;
+        }
+        return out.map((r) => ({ ...r, score: r.score == null ? undefined : +r.score, max: r.max == null ? undefined : +r.max }));
+      },
+      async get(id) { const { data, error } = await sb.from("entries").select("data").eq("id", id).maybeSingle(); if (error) throw error; return data && data.data; }
+    };
+  })();
+
+  function renderAccount() {
+    if (!sync.on) {
+      view.innerHTML = `<header class="page-head"><p class="eyebrow">Профил</p><h1>Синхронизация</h1><p class="lead">Синхронизацията между устройства не е включена в тази версия. Данните се пазят в този браузър; използвай резервното копие в „История“.</p></header>`;
+      return;
+    }
+    const u = sync.user;
+    view.innerHTML = `
+      <header class="page-head"><p class="eyebrow">Профил</p><h1>${u ? "Твоят профил" : "Влез, за да пазиш всичко"}</h1>
+      <p class="lead">${u ? "Всички тестове, отговори, съчинения и бележки се пазят в профила ти и се виждат от всяко устройство, от което влезеш." : "С профил историята, бележките и напредъкът ти се пазят онлайн — отвори сайта от телефона или от компютъра и всичко е там."}</p></header>
+      <section class="panel acct">
+        ${u ? `
+          <p>Влязла си като <b>${esc(u.email)}</b>.</p>
+          <p class="sync-line" data-sync-status></p>
+          <div class="row"><button class="btn primary" id="ac-sync">Синхронизирай сега</button><button class="btn ghost" id="ac-out">Изход</button></div>
+          <div id="ac-msg"></div>` : `
+          <form id="ac-form" class="acct-form">
+            <label class="fld"><span>Имейл</span><input type="email" id="ac-email" autocomplete="email" required></label>
+            <label class="fld"><span>Парола (поне 6 знака)</span><input type="password" id="ac-pw" autocomplete="current-password" minlength="6" required></label>
+            <div class="row"><button class="btn primary" type="submit" id="ac-in">Вход</button><button class="btn" type="button" id="ac-up">Създай профил</button></div>
+            <div id="ac-msg"></div>
+          </form>`}
+      </section>`;
+    sync.paint();
+    const msg = (t, warn) => { $("#ac-msg").innerHTML = `<p class="${warn ? "warn" : "muted"}">${esc(t)}</p>`; };
+    const errText = (e) => /invalid login/i.test(e.message) ? "Грешен имейл или парола." : /already registered/i.test(e.message) ? "Вече има профил с този имейл — натисни „Вход“." : /confirm/i.test(e.message) ? "Първо потвърди профила от линка в имейла си." : e.message;
+    if (u) {
+      $("#ac-sync").onclick = () => sync.pull();
+      $("#ac-out").onclick = async () => { await sync.sb.auth.signOut(); go("account"); };
+      return;
+    }
+    $("#ac-form").onsubmit = async (e) => {
+      e.preventDefault(); $("#ac-in").disabled = true;
+      const { error } = await sync.sb.auth.signInWithPassword({ email: $("#ac-email").value.trim(), password: $("#ac-pw").value });
+      $("#ac-in").disabled = false;
+      if (error) msg(errText(error), true); else go("account");
+    };
+    $("#ac-up").onclick = async () => {
+      const email = $("#ac-email").value.trim(), password = $("#ac-pw").value;
+      if (!email || password.length < 6) { msg("Въведи имейл и парола от поне 6 знака.", true); return; }
+      $("#ac-up").disabled = true;
+      const { data, error } = await sync.sb.auth.signUp({ email, password, options: { emailRedirectTo: location.origin + location.pathname } });
+      $("#ac-up").disabled = false;
+      if (error) msg(errText(error), true);
+      else if (!data.session) msg("Профилът е създаден. Отвори имейла си, натисни линка за потвърждение и после влез тук.");
+      else go("account");
+    };
+  }
+
+  window.__belSyncDirty = (k) => sync.dirty(k);
+
   // ---------- router ----------
-  const ROUTES = { home: renderHome, works: renderWorks, tests: renderTests, open: renderOpen, dzi: renderDZI, lang: renderLang, write: renderWrite, notes: renderNotes, history: renderHistory };
+  const ROUTES = { home: renderHome, works: renderWorks, tests: renderTests, open: renderOpen, dzi: renderDZI, lang: renderLang, write: renderWrite, notes: renderNotes, history: renderHistory, account: renderAccount };
   function go(route, arg) {
     const hash = arg ? `${route}-${arg}` : route;
     if (location.hash.slice(1) !== hash) window.history.replaceState(null, "", "#" + hash);
@@ -374,7 +531,7 @@
         <div class="row">
           <button class="btn primary" data-act="test">Тест върху творбата</button>
           <button class="btn" data-act="open">Отворени въпроси</button>
-          <button class="btn ghost" data-act="ai" data-needs-ai>Нови въпроси от Claude</button>
+          <button class="btn ghost ai-gen" data-act="ai">Нови въпроси от Claude</button>
         </div>
       </header>
       <div class="work-body">
@@ -474,7 +631,7 @@ ${ws.map(workBrief).join("\n\n")}
         <fieldset><legend>Брой въпроси</legend>
           <div class="seg">${[10, 20, 30, 50, 100, 0].map((n) => `<label><input type="radio" name="n" value="${n}" ${cfg.n === n ? "checked" : ""}><span>${n || "Без край"}</span></label>`).join("")}</div>
         </fieldset>
-        <div class="row"><button class="btn primary" type="submit">Започни теста</button><button class="btn ghost" type="button" id="cfg-ai">10 нови въпроса от Claude</button><p class="muted small" id="cfg-msg"></p></div>
+        <div class="row"><button class="btn primary" type="submit">Започни теста</button><button class="btn ghost ai-gen" type="button" id="cfg-ai">10 нови въпроса от Claude</button><p class="muted small" id="cfg-msg"></p></div>
       </form>
       <div id="ai-host"></div>
       <section class="panel">
@@ -509,7 +666,7 @@ ${ws.map(workBrief).join("\n\n")}
   function renderOpen(preWork) {
     const opts = WORKS.map((w) => `<option value="${w.id}" ${w.id === preWork ? "selected" : ""}>${esc(w.author)} — „${esc(w.title)}“</option>`).join("");
     view.innerHTML = `
-      <header class="page-head"><p class="eyebrow">Отворени въпроси</p><h1>Отговори със свои думи</h1><p class="lead">Като задачите с кратък и разширен свободен отговор на ДЗИ: 4–5 свързани изречения — твърдение, обосновка, пример от текста, извод. Claude проверява отговора и казва какво липсва.</p></header>
+      <header class="page-head"><p class="eyebrow">Отворени въпроси</p><h1>Отговори със свои думи</h1><p class="lead">Като задачите с кратък и разширен свободен отговор на ДЗИ: 4–5 свързани изречения — твърдение, обосновка, пример от текста, извод. Проверката оценява отговора и казва какво липсва.</p></header>
       <div class="panel">
         <div class="row wrap">
           <label class="fld"><span>Творба</span><select id="o-work"><option value="">Всички творби (случайно)</option>${opts}</select></label>
@@ -541,7 +698,7 @@ ${ws.map(workBrief).join("\n\n")}
       <p class="q-src">${esc(item.w.author)} — „${esc(item.w.title)}“</p>
       <h3 class="q-text">${esc(item.q)}</h3>
       <textarea id="o-a" rows="7" placeholder="Твоят отговор (4–5 изречения)…">${esc(store.get(draftKey, ""))}</textarea>
-      <div class="row"><button class="btn primary" id="o-check" data-needs-ai>Провери с Claude</button><button class="btn ghost" id="o-key">Покажи образец</button><span class="muted small" id="o-len"></span></div>
+      <div class="row"><button class="btn primary" id="o-check">Провери</button><button class="btn ghost" id="o-key">Покажи образец</button><span class="muted small" id="o-len"></span></div>
       <div id="o-out"></div>`;
     const ta = $("#o-a", host);
     const upd = () => { const n = (ta.value.match(/[.!?…]+(\s|$)/g) || []).length; $("#o-len", host).textContent = ta.value.trim() ? `${n} изречения` : ""; store.set(draftKey, ta.value); };
@@ -552,7 +709,7 @@ ${ws.map(workBrief).join("\n\n")}
   async function checkOpen(out, item, answer, w, btn) {
     if (!answer.trim() || (!item.q || !item.q.trim())) { out.innerHTML = `<p class="warn">Напиши ${item.q && item.q.trim() ? "отговор" : "въпроса и отговора"}, преди да проверяваш.</p>`; return; }
     btn.disabled = true;
-    out.innerHTML = `<div class="thinking">Claude чете отговора…</div>`;
+    out.innerHTML = `<div class="thinking">Проверявам отговора…</div>`;
     try {
       const prompt = `${TEACHER}
 
@@ -571,7 +728,7 @@ ${item.key ? "ОПОРНИ ТОЧКИ ЗА ВЕРЕН ОТГОВОР: " + item.k
       out.innerHTML = feedbackHTML(r, 3) + `<p class="muted small">Записано в историята.</p>`;
     } catch (e) {
       if (e.code === "unavailable" || e.code === "not_granted") logHistory({ t: "open", title: w ? `„${w.title}“ — ${item.q}` : item.q, w: w && w.id, q: item.q, answer, key: item.key });
-      out.innerHTML = `<p class="warn">${e.code === "unavailable" ? "Проверката с Claude работи, когато приложението е отворено в claude.ai. Междувременно сравни с образеца." : aiErr(e)}</p>` + (item.key ? `<div class="keybox"><h4>Образец</h4><p>${esc(item.key)}</p></div>` : "");
+      out.innerHTML = (offline(e) ? copyForAI("Отговорът ти е записан в историята.") : `<p class="warn">${aiErr(e)}</p>`) + (item.key ? `<div class="keybox"><h4>Образец за самопроверка</h4><p>${esc(item.key)}</p></div>` : "");
     } finally { btn.disabled = false; }
   }
   function feedbackHTML(r, max) {
@@ -629,7 +786,7 @@ ${item.key ? "ОПОРНИ ТОЧКИ ЗА ВЕРЕН ОТГОВОР: " + item.k
     host.innerHTML = `
       <form class="mock" id="mockf">
         <h2>Пробен изпит</h2>
-        <p class="muted">Отговори на всичко и натисни „Предай“ най-долу. Задачите с избираем отговор се проверяват веднага, а свободните отговори — от Claude.</p>
+        <p class="muted">Отговори на всичко и натисни „Предай“ най-долу. Задачите с избираем отговор се проверяват веднага, а свободните отговори — с AI проверка.</p>
         <h3 class="part">Част 1 · Избираем отговор</h3>
         ${mcq.map((q) => { n++; return `<fieldset class="mq" data-i="${n - 1}"><legend><span class="num">${n}.</span> ${esc(q.q)} <span class="q-src">${esc(q.src)}</span></legend>${q.order.map((k, j) => `<label class="mopt"><input type="radio" name="m${n - 1}" value="${k}"><span class="letter">${"АБВГД"[j]}</span> ${esc(q.o[k])}</label>`).join("")}</fieldset>`; }).join("")}
         <h3 class="part">Част 2 · Редактиране</h3>
@@ -657,7 +814,7 @@ ${item.key ? "ОПОРНИ ТОЧКИ ЗА ВЕРЕН ОТГОВОР: " + item.k
         $$("label", fs).forEach((l) => { const k = +l.querySelector("input").value; if (k === q.a) l.classList.add("right"); else if (v && k === +v.value) l.classList.add("wrong"); });
       });
       const res = $("#mock-res");
-      res.innerHTML = `<div class="grade-card"><div class="grade-num tnum">${c}<small>/22</small></div><div><div class="grade-name">Част 1</div><div class="muted">верни отговора с избираем отговор</div></div></div><div id="mock-ai" class="thinking">Claude проверява свободните отговори…</div>`;
+      res.innerHTML = `<div class="grade-card"><div class="grade-num tnum">${c}<small>/22</small></div><div><div class="grade-name">Част 1</div><div class="muted">верни отговора с избираем отговор</div></div></div><div id="mock-ai" class="thinking">Проверявам свободните отговори…</div>`;
       const items = [
         ...edits.map((t, i) => ({ type: "Редактиране", task: "Поправете грешките: " + t.text, key: t.fixed + " (" + t.note + ")", ans: f[`e${i}`].value, max: 2 })),
         ...short.map((q, i) => ({ type: "Кратък отговор", task: q.q + ` [${q.w.author} — „${q.w.title}“]`, key: q.key, ans: f[`s${i}`].value, max: 2 })),
@@ -684,7 +841,7 @@ ${items.map((it, i) => `#${i + 1} [${it.type}, max ${it.max}]\nЗАДАЧА: ${i
       } catch (er) {
         saveMock(null);
         mk.className = "";
-        mk.innerHTML = `<p class="warn">${er.code === "unavailable" ? "Свободните отговори се проверяват от Claude, когато приложението е отворено в claude.ai. Ето верните отговори за самопроверка:" : aiErr(er)}</p><ol class="review">${items.map((it) => `<li><p><b>${esc(it.task)}</b></p>${it.ans ? `<p class="yours">${esc(it.ans)}</p>` : ""}<p class="keyline">${esc(it.key)}</p></li>`).join("")}</ol>`;
+        mk.innerHTML = `${offline(er) ? copyForAI("Свободните отговори не са проверени автоматично.") + `<p class="muted">Верните отговори за самопроверка:</p>` : `<p class="warn">${aiErr(er)}</p>`}<ol class="review">${items.map((it) => `<li><p><b>${esc(it.task)}</b></p>${it.ans ? `<p class="yours">${esc(it.ans)}</p>` : ""}<p class="keyline">${esc(it.key)}</p></li>`).join("")}</ol>`;
       }
       res.scrollIntoView({ behavior: "smooth" });
     };
@@ -737,7 +894,7 @@ ${items.map((it, i) => `#${i + 1} [${it.type}, max ${it.max}]\nЗАДАЧА: ${i
     if (pre) { draft.kind = pre.kind; draft.topic = pre.topic; store.set("writeTopic", null); }
     let kind = draft.kind;
     view.innerHTML = `
-      <header class="page-head"><p class="eyebrow">Задача 41</p><h1>Интерпретативно съчинение и есе</h1><p class="lead">Правилата, структурата, критериите и пример. Напиши своя текст — или качи снимка на ръкописа — и Claude ще го провери по критериите на ДЗИ.</p></header>
+      <header class="page-head"><p class="eyebrow">Задача 41</p><h1>Интерпретативно съчинение и есе</h1><p class="lead">Правилата, структурата, критериите и пример. Напиши своя текст и го провери по критериите на ДЗИ.</p></header>
       <div class="tabs" role="tablist">
         <button role="tab" data-k="is">Интерпретативно съчинение</button>
         <button role="tab" data-k="essay">Есе</button>
@@ -822,7 +979,7 @@ ${items.map((it, i) => `#${i + 1} [${it.type}, max ${it.max}]\nЗАДАЧА: ${i
       const wk = WORKS.find((w) => topic.value.includes(w.title));
       ctl = new AbortController();
       $("#k-check").disabled = true; $("#k-stop").hidden = false;
-      out.innerHTML = `<div class="thinking">Claude чете текста внимателно. Това отнема до минута…</div>`;
+      out.innerHTML = `<div class="thinking">Проверявам текста внимателно. Това отнема до минута…</div>`;
       const prompt = `${TEACHER}
 
 Оцени ${g.name.toUpperCase()} на ученичка като проверител на задача 41 от ДЗИ по БЕЛ.
@@ -839,6 +996,7 @@ ${photos.length ? "Текстът е (и) на приложените снимк
 Отговори само с JSON:
 {"thesis":"тезата, както я разбираш от текста (или 'Липсва ясна теза')","criteria":[{"name":"име на критерия","score":0-5,"comment":"1-2 изречения"}],"strengths":["..."],"weaknesses":["..."],"errors":[{"wrong":"откъс","right":"поправка","why":"правило"}],"structure":"коментар за увод, изложение, заключение","advice":["3-5 конкретни съвета"],"grade":"оценка по шестобалната система с десети, напр. 5.25"}`;
       try {
+        lastPrompt = prompt;
         const s = await getSample(); if (!s) throw { code: "unavailable" };
         const opts = { modelTier: "complex", cache: false, signal: ctl.signal };
         if (photos.length) opts.images = photos;
@@ -847,7 +1005,8 @@ ${photos.length ? "Текстът е (и) на приложените снимк
         logHistory({ t: "essay", title: `${k === "is" ? "ИС" : "Есе"}: ${topic.value}`, grade: r.grade ? String(r.grade) : "", kind: k, topic: topic.value, text: text.value, photos: photos.length, fb: r });
         out.insertAdjacentHTML("beforeend", `<p class="muted small">Съчинението и оценката са записани в историята.</p>`);
       } catch (e) {
-        out.innerHTML = `<p class="warn">${e.code === "unavailable" ? "Проверката на съчинения работи, когато приложението е отворено в claude.ai." : aiErr(e)}</p>`;
+        if (offline(e)) logHistory({ t: "essay", title: `${k === "is" ? "ИС" : "Есе"}: ${topic.value}`, kind: k, topic: topic.value, text: text.value });
+        out.innerHTML = offline(e) ? copyForAI("Съчинението е записано в историята.") : `<p class="warn">${aiErr(e)}</p>`;
       } finally { $("#k-check").disabled = false; $("#k-stop").hidden = true; }
     };
   }
@@ -868,9 +1027,15 @@ ${photos.length ? "Текстът е (и) на приложените снимк
   }
 
   // ---------- HISTORY ----------
-  function renderHistory(id) {
+  function renderHistory(id, remoteAll) {
     if (id) return renderHistoryItem(id);
-    const all = getHistory();
+    if (sync.user && !remoteAll) {
+      view.innerHTML = `<header class="page-head"><p class="eyebrow">Архив</p><h1>История</h1></header><div class="thinking">Зареждам всички записи от профила ти…</div>`;
+      sync.listAll().then((rows) => { if (location.hash.slice(1) === "history") renderHistory(null, rows); }).catch(() => { if (location.hash.slice(1) === "history") renderHistory(null, []); });
+      return;
+    }
+    const local = getHistory();
+    const all = remoteAll ? (() => { const m = new Map(remoteAll.map((x) => [x.id, x])); local.forEach((x) => m.set(x.id, x)); const del = new Set(store.get("syncDeleted", [])); return [...m.values()].filter((x) => !del.has(x.id)).sort((a, b) => a.d - b.d); })() : local;
     const f = store.get("hfilter", "all");
     const counts = {}; all.forEach((x) => counts[x.t] = (counts[x.t] || 0) + 1);
     const scored = all.filter((x) => x.max && ["test", "lang", "ai", "mock"].includes(x.t));
@@ -911,7 +1076,16 @@ ${photos.length ? "Текстът е (и) на приложените снимк
     $("#bk-save").onclick = async () => {
       const out = $("#bk-out");
       const dl = window.claude && window.claude.use ? await window.claude.use("downloads").catch(() => null) : null;
-      if (!dl) { out.innerHTML = `<p class="warn">Запазването във файл работи в claude.ai. Използвай „Копирай като текст“ и постави текста в бележка или имейл до себе си.</p>`; return; }
+      if (!dl) {
+        try {
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(new Blob([dump()], { type: "application/json" }));
+          a.download = `matura-bel-${new Date().toISOString().slice(0, 10)}.json`;
+          document.body.appendChild(a); a.click(); a.remove();
+          out.innerHTML = `<p class="muted small">Файлът е свален. Пази го — с него можеш да възстановиш всичко.</p>`;
+        } catch { out.innerHTML = `<p class="warn">Файлът не можа да се свали. Използвай „Копирай като текст“.</p>`; }
+        return;
+      }
       try { await dl.save({ filename: `matura-bel-${new Date().toISOString().slice(0, 10)}.json`, data: dump() }); out.innerHTML = `<p class="muted small">Копието е запазено.</p>`; }
       catch (e) { out.innerHTML = `<p class="muted small">Копието не е запазено${e && e.code ? " (" + esc(e.code) + ")" : ""}.</p>`; }
     };
@@ -929,7 +1103,7 @@ ${photos.length ? "Текстът е (и) на приложените снимк
           if (d.app !== "matura-bel") throw 0;
           const ids = new Set(getHistory().map((x) => x.id));
           const merged = getHistory().concat((d.history || []).filter((x) => !ids.has(x.id))).sort((a, b) => a.d - b.d).slice(-400);
-          store.set("history", merged);
+          store.set("history", merged); sync.pushAll();
           const nIds = new Set(store.get("notes", []).map((n) => n.id));
           store.set("notes", store.get("notes", []).concat((d.notes || []).filter((n) => !nIds.has(n.id))));
           if (d.stats && d.stats.answered > stats().answered) store.set("stats", d.stats);
@@ -956,9 +1130,16 @@ ${photos.length ? "Текстът е (и) на приложените снимк
       <text x="${pl}" y="${H - 4}" class="ax">по-стари</text><text x="${W - pr}" y="${H - 4}" class="ax" text-anchor="end">последен</text>
     </svg></div>`;
   }
-  function renderHistoryItem(id) {
-    const x = getHistory().find((e) => e.id === id);
-    if (!x) return renderHistory();
+  function renderHistoryItem(id, fetched) {
+    const x = fetched || getHistory().find((e) => e.id === id);
+    if (!x) {
+      if (sync.user && !fetched) {
+        view.innerHTML = `<div class="thinking">Зареждам записа…</div>`;
+        sync.get(id).then((d) => d ? renderHistoryItem(id, d) : go("history")).catch(() => go("history"));
+        return;
+      }
+      return renderHistory();
+    }
     const when = new Date(x.d).toLocaleString("bg-BG", { day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" });
     let body = "";
     if (x.items) body += `<h2>${x.t === "mock" ? "Част 1 · Избираем отговор" : "Въпроси"}</h2>${reviewList(x.items)}`;
@@ -982,7 +1163,7 @@ ${photos.length ? "Текстът е (и) на приложените снимк
     $("#h-del").onclick = (e) => {
       const b = e.currentTarget;
       if (!b.dataset.confirm) { b.dataset.confirm = "1"; b.textContent = "Сигурна ли си? Натисни пак"; b.classList.add("danger"); return; }
-      store.set("history", getHistory().filter((e2) => e2.id !== x.id)); go("history");
+      store.set("history", getHistory().filter((e2) => e2.id !== x.id)); sync.remove(x.id); go("history");
     };
   }
 
@@ -1031,4 +1212,5 @@ ${photos.length ? "Текстът е (и) на приложените снимк
   }
 
   render();
+  sync.start();
 })();
