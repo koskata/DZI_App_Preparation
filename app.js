@@ -442,6 +442,11 @@
     const surname = w.author.split(" ").pop();
     return q.o.some((o) => o.includes(w.title) || o.includes(w.author) || o.includes(surname));
   }
+  // In a test about one work, "which work / which author" questions answer themselves.
+  function answerIsWork(q, w) {
+    const c = String(q.o[q.a]);
+    return c.includes(w.title) || c.includes(w.author) || c.includes(w.author.split(" ").pop());
+  }
   function reviewList(items) {
     return `<ol class="review">${items.map((l) => `<li class="${l.c === l.a ? "is-ok" : "is-no"}"><p class="q-src">${esc(l.src || "")}</p><p><b>${esc(l.q)}</b></p>${l.c === l.a ? `<p class="red-pen"><span>✓ ${esc(l.o[l.a])}</span></p>` : `<p class="red-pen">${l.c != null ? `<s>${esc(l.o[l.c])}</s> → ` : `<i class="muted">без отговор</i> → `}<span>${esc(l.o[l.a])}</span></p>`}<p class="muted">${esc(l.e || "")}</p>${l.w && l.c !== l.a ? `<a href="#work-${l.w}" data-go="work" data-arg="${l.w}">Прочети за творбата</a>` : ""}</li>`).join("")}</ol>`;
   }
@@ -550,7 +555,8 @@
       <div class="work-body">
         <article class="study">
           ${w.quotes && w.quotes.length ? `<section><h2>Ключови цитати</h2>${w.quotes.map((q) => `<blockquote>${esc(q)}</blockquote>`).join("")}</section>` : ""}
-          <section><h2>Съдържание</h2><p>${w.plot}</p></section>
+          <section><h2>Съдържание</h2>${storyHTML(w)}</section>
+          ${circleHTML(w, t)}
           ${w.characters ? `<section><h2>${w.lyric ? "Лирически говорител и адресат" : "Герои"}</h2>${list(w.characters)}</section>` : ""}
           <section><h2>Теми</h2>${list(w.themes)}</section>
           <section><h2>Композиция</h2><p>${w.composition}</p></section>
@@ -568,9 +574,33 @@
       <section class="panel"><h2>Моите тестове за „${esc(w.title)}“</h2>${(() => { const h = getHistory().filter((x) => x.title === w.title || x.title === `Нови въпроси · „${w.title}“` || (x.t === "open" && x.w === w.id)); return h.length ? `<ul class="hrows">${h.slice(-8).reverse().map(hRow).join("")}</ul>` : `<p class="muted">Все още нищо за тази творба.</p>`; })()}</section>`;
     const ta = $("#wnote"); let tmr;
     ta.oninput = () => { clearTimeout(tmr); $("#wnote-state").textContent = "Записване…"; tmr = setTimeout(() => { saveWorkNote(w, ta.value); $("#wnote-state").textContent = "Запазено"; }, 500); };
-    $("[data-act=test]").onclick = () => { const h = $("#whost"); h.innerHTML = `<div class="page-narrow" id="wq"></div>`; runQuiz($("#wq"), shuffle(litPool({ works: [w.id] })), { title: w.title, onDone: () => renderWork(w.id) }); h.scrollIntoView({ behavior: "smooth" }); };
+    $("[data-act=test]").onclick = () => { const h = $("#whost"); h.innerHTML = `<div class="page-narrow" id="wq"></div>`; runQuiz($("#wq"), shuffle(litPool({ works: [w.id] }).filter((q) => !answerIsWork(q, w))), { title: w.title, onDone: () => renderWork(w.id) }); h.scrollIntoView({ behavior: "smooth" }); };
     $("[data-act=open]").onclick = () => go("open", w.id);
     $("[data-act=ai]").onclick = () => aiQuestions(w);
+  }
+  // Ordered summary: short intro + numbered steps; quotations are set apart from the narration.
+  function storyHTML(w) {
+    const st = (window.STORY || {})[w.id];
+    if (!st) return `<p>${w.plot}</p>`;
+    const fmt = (t) => esc(t).replace(/„([^“]+)“/g, '<span class="qt">„$1“</span>');
+    return `${st.intro ? `<p class="story-intro">${fmt(st.intro)}</p>` : ""}
+      <ol class="story">${st.steps.map(([h, t]) => `<li><span class="story-h">${esc(h)}</span><p>${fmt(t)}</p></li>`).join("")}</ol>`;
+  }
+  // The work seen through the two poles of its thematic circle.
+  const CIRCLE_LABELS = {
+    rodno: ["Родното", "Чуждото"], pamet: ["Миналото", "Паметта"], vlast: ["Обществото", "Властта"],
+    smart: ["Животът", "Смъртта"], priroda: ["Образът на природата", "Човекът и природата"],
+    lubov: ["Каква е любовта", "Какво ѝ противостои"], vyara: ["Вярата", "Надеждата"],
+    trud: ["Трудът", "Творчеството"], izbor: ["Изборът", "Раздвоението"]
+  };
+  function circleHTML(w, t) {
+    const c = (window.CIRCLE || {})[w.id], L = CIRCLE_LABELS[w.theme];
+    if (!c || !L || !t) return "";
+    const fmt = (x) => x.replace(/„([^“]+)“/g, '<span class="qt">„$1“</span>');
+    const col = (label, items) => `<div class="pole"><h3>${esc(label)}</h3><ul>${items.map((x) => `<li>${fmt(x)}</li>`).join("")}</ul></div>`;
+    return `<section class="circle"><h2>${esc(t.name)} в творбата</h2>
+      <div class="poles">${col(L[0], c.a)}${col(L[1], c.b)}</div>
+      ${c.sum ? `<p class="circle-sum"><b>Извод.</b> ${fmt(c.sum)}</p>` : ""}</section>`;
   }
   function saveWorkNote(w, body) {
     const notes = store.get("notes", []);
@@ -756,109 +786,274 @@ ${item.key ? "ОПОРНИ ТОЧКИ ЗА ВЕРЕН ОТГОВОР: " + item.k
   }
 
   // ---------- DZI (mock exam + archive) ----------
+  // ---------- DZI: archive + faithful mock exam (41 tasks, 3 parts, 100 points) ----------
+  const DZI = () => window.DZI || {};
+  const OFFICIAL = [
+    ["Матура по БЕЛ, 20 май 2026", "https://www.mon.bg/nfs/2026/05/dzi_bel_otgovori_20.05.2026.pdf"],
+    ["Матура по БЕЛ, 21 май 2025", "https://www.mon.bg/nfs/2025/05/dzi-bel_21052025.pdf"],
+    ["Матура по БЕЛ, 17 май 2024", "https://www.mon.bg/nfs/2024/05/dzi-bel_17052024-otgovori.pdf"]
+  ];
   function renderDZI() {
+    const run = store.get("mockRun", null);
     view.innerHTML = `
-      <header class="page-head"><p class="eyebrow">ДЗИ</p><h1>Матури от минали години и пробен изпит</h1>
-      <p class="lead">Изпитът има 41 задачи: 22 с избираем отговор, 16 с кратък свободен отговор, 2 с разширен свободен отговор (текст от 4–5 изречения) и задача 41 — интерпретативно съчинение или есе.</p></header>
+      <header class="page-head"><p class="eyebrow">ДЗИ</p><h1>Матури и пробен изпит</h1>
+      <p class="lead">Изпитът има 41 задачи в три части: 22 с избираем отговор, 16 с кратък свободен отговор, 2 с разширен свободен отговор (текст до 5 изречения) и задача 41 — есе или интерпретативно съчинение. Общо 100 точки за 4 часа.</p></header>
       <div class="grid2">
         <section class="panel">
-          <h2>Официални изпити</h2>
-          <p>Реалните варианти с ключовете за отговори се публикуват от МОН след всяка сесия. Реши ги на хартия, после въведи отговорите си от задачите със свободен отговор в „Отворени въпроси → Провери отговор на свой въпрос“.</p>
-          <ul class="links">
-            <li><a href="https://www.mon.bg/obshto-obrazovanie/darzhavni-zrelostni-izpiti-dzi/izpitni-materiali-za-dzi-po-predmeti/balgarski-ezik/" target="_blank" rel="noopener">Архив на МОН — изпитни материали по БЕЛ</a><span class="muted small">всички сесии, с ключове</span></li>
-            <li><a href="https://danybon.com/obrazovanie/dzi-bel-may-25/" target="_blank" rel="noopener">Матура по БЕЛ, май 2025</a><span class="muted small">тест и отговори</span></li>
-            <li><a href="https://danybon.com/obrazovanie/dzi-bel-24/" target="_blank" rel="noopener">Матура по БЕЛ, 2024</a><span class="muted small">тест и отговори</span></li>
-            <li><a href="https://danybon.com/obrazovanie/dzi-bel-2023/" target="_blank" rel="noopener">Матура по БЕЛ, 2023</a><span class="muted small">тест и отговори</span></li>
-          </ul>
+          <h2>Пробен изпит като на ДЗИ</h2>
+          <p>Нов вариант при всяко пускане, със същия ред на задачите, формулировки и точки като на истинския изпит.</p>
+          <table class="dzi-plan"><tbody>
+            <tr><th>Част 1 · 60 мин.</th><td>1–7 правопис, граматика, пунктуация · 8–12 запишете правилната форма · 13 пропуснати препинателни знаци · 14–21 текст и диаграма</td><td class="r tnum">37 т.</td></tr>
+            <tr><th>Част 2 · 60 мин.</th><td>22–23 лексика · 24–34 литература (вкл. непознат текст и откъс) · 35–38 кратки отговори · 39 автор–творба · 40 съпоставка на два откъса</td><td class="r tnum">33 т.</td></tr>
+            <tr><th>Част 3 · 120 мин.</th><td>41 есе или интерпретативно съчинение</td><td class="r tnum">30 т.</td></tr>
+          </tbody></table>
+          <div class="row">${run && !run.done ? `<button class="btn primary" id="mock-resume">Продължи започнатия изпит</button><button class="btn" id="mock-go">Нов изпит</button>` : `<button class="btn primary" id="mock-go">Започни пробен изпит</button>`}</div>
         </section>
         <section class="panel">
-          <h2>Пробен изпит в приложението</h2>
-          <p>Нов вариант при всяко пускане, по формата на ДЗИ: езикови и литературни задачи с избираем отговор, редактиране на изречения, задачи със свободен отговор и тема за съчинение.</p>
-          <ol class="plan">
-            <li><b>Задачи 1–22</b> — избираем отговор (12 език, 10 литература)</li>
-            <li><b>Задачи 23–26</b> — поправи грешките в изречение</li>
-            <li><b>Задачи 27–30</b> — кратък отговор за творба</li>
-            <li><b>Задачи 31–32</b> — разширен отговор (4–5 изречения)</li>
-            <li><b>Задача 41</b> — избор между ИС и есе</li>
-          </ol>
-          <button class="btn primary" id="mock-go">Започни пробен изпит</button>
+          <h2>Официални изпити на МОН</h2>
+          <p>Пълните тестове с ключовете за отговори. Реши ги на хартия, после провери свободните отговори в „Отворени въпроси → Провери отговор на свой въпрос“.</p>
+          <ul class="links">${OFFICIAL.map(([t, u]) => `<li><a href="${u}" target="_blank" rel="noopener">${esc(t)}</a><span class="muted small">PDF · тест и ключ</span></li>`).join("")}
+            <li><a href="https://www.mon.bg/obshto-obrazovanie/darzhavni-zrelostni-izpiti-dzi/izpitni-materiali-za-dzi-po-predmeti/balgarski-ezik/" target="_blank" rel="noopener">Архив на МОН — всички сесии</a><span class="muted small">по-стари изпити</span></li>
+          </ul>
         </section>
       </div>
       <div id="mock"></div>
       <section class="panel"><div class="panel-head"><h2>Моите пробни изпити</h2><a href="#history" data-go="history">Цялата история →</a></div>${historyRows(["mock"], 10, "Все още няма решени пробни изпити.")}</section>`;
-    $("#mock-go").onclick = startMock;
+    $("#mock-go").onclick = () => { const ex = buildExam(); store.set("mockRun", { exam: ex, ans: {}, start: Date.now() }); showExam(); };
+    if ($("#mock-resume")) $("#mock-resume").onclick = showExam;
   }
-  function startMock() {
-    const mcq = shuffle(langPool()).slice(0, 12).concat(shuffle(litPool()).slice(0, 10)).map((q) => ({ ...q, order: shuffle(q.o.map((_, k) => k)) }));
-    const edits = shuffle(window.EDIT_TASKS || []).slice(0, 4);
-    const opens = shuffle(WORKS.flatMap((w) => (w.open || []).map((q) => ({ ...q, w })))).slice(0, 6);
-    const short = opens.slice(0, 4), ext = opens.slice(4, 6);
-    const isT = pick(W.topicsIS), esT = pick(W.topicsEssay);
-    let n = 0;
+
+  // ----- building one exam variant -----
+  const normA = (s) => String(s || "").toLowerCase().replace(/ѝ/g, "и").replace(/[„“"'«».,!?;:()–—-]/g, " ").replace(/\s+/g, " ").trim();
+  const mcqOf = (q, n, extra = {}) => ({ n, kind: "mcq", pts: 1, q: q.q, o: q.o, a: q.a ?? 0, e: q.e || "", src: q.src || "", order: shuffle(q.o.map((_, k) => k)), ...extra });
+  function pickLang(ids, used) {
+    const pool = langPool(ids).filter((q) => q.o.length === 4 && !used.has(q.id));
+    const q = pick(pool.length ? pool : langPool(ids)); used.add(q.id); return q;
+  }
+  function buildExam() {
+    const D = DZI(), used = new Set(), T = [];
+    // Part 1: 1–7
+    [["vowels", "double", "yi"], ["vowels", "double", "yi"], ["together", "caps"], ["clen", "grammar"], ["grammar", "verbforms"], ["punct", "speech"], ["punct", "speech"]]
+      .forEach((ids, i) => T.push(mcqOf(pickLang(ids, used), i + 1)));
+    // 8–12
+    const fb = shuffle(D.formInBrackets || []), gw = shuffle(D.grammarWord || []);
+    const short = (n, it, instr, pts = 2) => T.push({ n, kind: "short", pts, instr, s: it.s, a: it.a, e: it.e || "" });
+    if (fb[0]) short(8, fb[0], "В листа за отговори запишете правилната за изречението форма на думата, поставена в скоби.");
+    const sw = pick(D.spellWord || []); if (sw) short(9, sw, "В листа за отговори запишете правилно САМО думата, в която е допусната правописна грешка.");
+    if (fb[1]) short(10, fb[1], "В листа за отговори запишете правилната за изречението форма на думата, поставена в скоби.");
+    if (gw[0]) short(11, gw[0], "В листа за отговори запишете САМО правилната за изречението форма на думата, в която е допусната граматична грешка.");
+    if (gw[1]) short(12, gw[1], "В листа за отговори запишете САМО правилната за изречението форма на думата, в която е допусната граматична грешка.");
+    const pt = pick(D.punctText || []); if (pt) T.push({ n: 13, kind: "punct", pts: 5, t: pt.t, key: pt.key, e: pt.e || "" });
+    // 14–21: Text 1 + Text 2 (diagram)
+    const R = pick(D.reading || []);
+    if (R) {
+      T.push(mcqOf(R.t14, 14), mcqOf(R.t15, 15), mcqOf(R.t16, 16), mcqOf(R.t17, 17));
+      T.push({ n: 18, kind: "short", pts: 1, instr: R.t18.q, a: R.t18.a, e: R.t18.e || "", contains: true });
+      T.push({ n: 19, kind: "short", pts: 2, instr: R.t19.q, a: R.t19.a, e: R.t19.e || "", contains: true });
+      T.push({ n: 20, kind: "open", pts: 2, instr: R.t20.q, key: (R.t20.a || []).join("; "), rows: 3 });
+      T.push({ n: 21, kind: "open", pts: 6, instr: R.t21.q, key: R.t21.key, rows: 7 });
+    }
+    // Part 2
+    const pr = pick(D.paronym || []); if (pr) short(22, pr, "В листа за отговори запишете САМО паронима, с който да поправите лексикалната грешка в изречението.");
+    const gp = pick(D.gaps || []); if (gp) T.push({ n: 23, kind: "gaps", pts: 3, t: gp.t, opts: gp.opts, a: gp.a, e: gp.e || "" });
+    const cmp = shuffle(D.compareMCQ || []);
+    const litFill = shuffle(litPool({ gen: false }).filter((q) => q.o.length === 4));
+    const nextLit = () => cmp.length ? cmp.pop() : litFill.pop();
+    for (let n = 24; n <= 29; n++) T.push(mcqOf(nextLit(), n));
+    const un = pick(D.unknown || []);
+    if (un) T.push(mcqOf(un, 30, { excerpt: un.excerpt, exHead: `${un.author} — „${un.title}“ (откъс)` })); else T.push(mcqOf(nextLit(), 30));
+    T.push(mcqOf(nextLit(), 31), mcqOf(nextLit(), 32));
+    const P = pick(D.prose || []);
+    const pm = P ? P.tasks.filter((t) => t.type === "mcq") : [], ps = P ? P.tasks.find((t) => t.type === "short") : null;
+    if (P) T.push({ n: 33, kind: "passage", intro: P.intro, excerpt: P.excerpt });
+    T.push(mcqOf(pm[0] || nextLit(), 33), mcqOf(pm[1] || nextLit(), 34));
+    const ls = shuffle(D.litShort || []);
+    const lsTask = (n, it) => T.push({ n, kind: "open", pts: 2, instr: it.q, excerpt: it.excerpt || "", key: it.key, rows: 3 });
+    if (ps) lsTask(35, ps); else if (ls.length) lsTask(35, ls.pop());
+    [36, 37, 38].forEach((n) => { if (ls.length) lsTask(n, ls.pop()); });
+    // 39 author–work matching (3 distinct authors)
+    const byAuthor = shuffle([...new Set(WORKS.map((w) => w.author))]).slice(0, 3).map((a) => pick(WORKS.filter((w) => w.author === a)));
+    T.push({ n: 39, kind: "match", pts: 3, works: byAuthor.map((w) => w.title), authors: shuffle(byAuthor.map((w) => w.author)), a: byAuthor.map((w) => w.author) });
+    const c40 = pick(D.compare40 || []); if (c40) T.push({ n: 40, kind: "open", pts: 6, instr: c40.q, A: c40.A, B: c40.B, key: c40.key, rows: 7 });
+    // Part 3
+    const is = pick(D.is41 || []), es = pick(D.essay41 || W.topicsEssay);
+    T.push({ n: 41, kind: "write", pts: 30, essay: es, is: is ? { topic: is.topic, label: is.label, excerpt: is.excerpt || "", work: is.work } : { topic: pick(W.topicsIS), label: "(Интерпретативно съчинение)", excerpt: "" } });
+    return { reading: R ? { text1: R.text1, chart: R.chart } : null, tasks: T };
+  }
+
+  // ----- diagram (Text 2): grouped horizontal bars with exam-like textures -----
+  function chartSVG(c) {
+    const id = "p" + Math.random().toString(36).slice(2, 7);
+    const S = c.series.length, rowH = S * 17 + 18, labW = 200, plotW = 380, valW = 44, top = 8;
+    const max = Math.max(10, Math.ceil(Math.max(...c.series.flatMap((s) => s.values)) / 10) * 10);
+    const H = top + c.categories.length * rowH + 30, Wd = labW + plotW + valW;
+    const x = (v) => labW + (v / max) * plotW;
+    const pats = [
+      `<pattern id="${id}0" width="4" height="4" patternUnits="userSpaceOnUse"><rect width="4" height="4" fill="currentColor"/><circle cx="2" cy="2" r=".9" class="pbg"/></pattern>`,
+      `<pattern id="${id}1" width="4" height="4" patternUnits="userSpaceOnUse"><rect width="4" height="4" class="pbg"/><rect width="4" height="2.2" fill="currentColor"/></pattern>`,
+      `<pattern id="${id}2" width="4" height="4" patternUnits="userSpaceOnUse"><rect width="4" height="4" class="pbg"/><rect width="2.2" height="4" fill="currentColor"/></pattern>`
+    ];
+    const ticks = []; for (let v = 0; v <= max; v += max <= 50 ? 10 : 20) ticks.push(v);
+    let bars = "";
+    c.categories.forEach((cat, i) => {
+      const y0 = top + i * rowH + 9;
+      bars += `<text x="${labW - 10}" y="${y0 + (S * 17) / 2}" class="cl" text-anchor="end" dominant-baseline="middle">${esc(cat)}</text>`;
+      c.series.forEach((s, j) => {
+        const v = s.values[i], y = y0 + j * 17;
+        bars += `<rect x="${labW}" y="${y}" width="${Math.max(1, x(v) - labW)}" height="14" fill="url(#${id}${j % 3})" class="bar"><title>${esc(s.name)}: ${v}${esc(c.unit || "")}</title></rect><text x="${x(v) + 5}" y="${y + 7}" class="cv" dominant-baseline="middle">${v}${esc(c.unit || "")}</text>`;
+      });
+    });
+    const axis = ticks.map((v) => `<line x1="${x(v)}" x2="${x(v)}" y1="${top}" y2="${H - 26}" class="cg"/><text x="${x(v)}" y="${H - 12}" class="ct" text-anchor="middle">${v}${esc(c.unit || "")}</text>`).join("");
+    const legend = c.series.map((s, j) => `<span class="lg"><svg width="22" height="12" aria-hidden="true"><defs>${pats[j % 3].replace(`id="${id}${j % 3}"`, `id="${id}L${j}"`)}</defs><rect width="22" height="12" fill="url(#${id}L${j})" class="bar"/></svg>${esc(s.name)}</span>`).join("");
+    return `<figure class="dchart"><figcaption>${esc(c.title)}</figcaption>
+      <div class="dchart-scroll"><svg viewBox="0 0 ${Wd} ${H}" role="img" aria-label="${esc(c.title)}"><defs>${pats.join("")}</defs>${axis}${bars}</svg></div>
+      <div class="legend">${legend}</div>${c.source ? `<p class="muted small">${esc(c.source)}</p>` : ""}</figure>`;
+  }
+
+  // ----- showing the exam -----
+  function showExam() {
+    const run = store.get("mockRun", null); if (!run) return renderDZI();
+    const { exam } = run, ans = run.ans || {};
     const host = $("#mock");
+    const L = "АБВГ";
+    const val = (k) => esc(ans[k] || "");
+    const excerptBox = (head, txt) => `<div class="excerpt">${head ? `<p class="exhead">${esc(head)}</p>` : ""}<p>${esc(txt)}</p></div>`;
+    const task = (t) => {
+      const num = `<span class="num">${t.n}.</span>`;
+      const pts = t.pts ? `<span class="tpts">${t.pts} т.</span>` : "";
+      if (t.kind === "passage") return `<div class="passage"><p><b>${esc(t.intro)}</b></p>${excerptBox("", t.excerpt)}</div>`;
+      if (t.kind === "mcq") return `<fieldset class="mq" data-n="${t.n}"><legend>${num} ${esc(t.q)} ${pts}</legend>${t.excerpt ? excerptBox(t.exHead, t.excerpt) : ""}${t.order.map((k, j) => `<label class="mopt"><input type="radio" name="q${t.n}" value="${k}" ${ans["q" + t.n] === String(k) ? "checked" : ""}><span class="letter">${L[j]}</span> ${esc(t.o[k])}</label>`).join("")}</fieldset>`;
+      if (t.kind === "short") return `<div class="oq" data-n="${t.n}"><p>${num} ${esc(t.instr)} ${pts}</p>${t.s ? `<p class="sent">${esc(t.s)}</p>` : ""}<input type="text" name="q${t.n}" value="${val("q" + t.n)}" autocomplete="off"></div>`;
+      if (t.kind === "punct") return `<div class="oq" data-n="${t.n}"><p>${num} В текста са пропуснати САМО ПЕТ препинателни знака. Препишете ЦЕЛИЯ текст в листа за отговори, като поставите пропуснатите знаци. ${pts}</p><p class="sent">${esc(t.t)}</p><textarea name="q${t.n}" rows="4">${ans["q" + t.n] != null ? val("q" + t.n) : esc(t.t)}</textarea></div>`;
+      if (t.kind === "gaps") return `<div class="oq" data-n="${t.n}"><p>${num} Прочетете текста. За всяко празно място изберете УМЕСТНАТА дума и я запишете срещу съответната буква в листа за отговори. ${pts}</p><p class="sent">${esc(t.t)}</p><div class="gaprow">${Object.keys(t.opts).map((g) => `<label class="fld"><span>(${g})</span><select name="q${t.n}${g}"><option value="">—</option>${t.opts[g].map((o) => `<option ${ans["q" + t.n + g] === o ? "selected" : ""}>${esc(o)}</option>`).join("")}</select></label>`).join("")}</div></div>`;
+      if (t.kind === "match") return `<div class="oq" data-n="${t.n}"><p>${num} Свържете заглавието на всяка от творбите с нейния автор, като в листа за отговори срещу съответната буква запишете номера, под който е записано името на автора. ${pts}</p><div class="match"><ol class="mt">${t.works.map((w, i) => `<li><b>${"АБВ"[i]})</b> „${esc(w)}“ <select name="q${t.n}${i}"><option value="">—</option>${t.authors.map((_, k) => `<option value="${k}" ${ans["q" + t.n + i] === String(k) ? "selected" : ""}>${k + 1}</option>`).join("")}</select></li>`).join("")}</ol><ol class="ma">${t.authors.map((a, k) => `<li><b>${k + 1}.</b> ${esc(a)}</li>`).join("")}</ol></div></div>`;
+      if (t.kind === "open") return `<div class="oq" data-n="${t.n}"><p>${num} ${esc(t.instr)} ${pts}</p>${t.excerpt ? excerptBox("", t.excerpt) : ""}${t.A ? `<div class="pair">${excerptBox(`${t.A.author} — „${t.A.title}“`, t.A.excerpt)}${excerptBox(`${t.B.author} — „${t.B.title}“`, t.B.excerpt)}</div>` : ""}<textarea name="q${t.n}" rows="${t.rows || 4}">${val("q" + t.n)}</textarea></div>`;
+      if (t.kind === "write") return `<div class="oq" data-n="${t.n}"><p>${num} Напишете аргументативен текст в обем до 4 страници по ЕДНА от следните две теми: ${pts}</p>
+        <div class="pair"><button type="button" class="topic-btn" data-kind="essay" data-t="${esc(t.essay)}"><span class="eyebrow">Тема за есе</span>${esc(t.essay)} (Есе)</button>
+        <button type="button" class="topic-btn" data-kind="is" data-t="${esc(t.is.topic)}"><span class="eyebrow">Тема за интерпретативно съчинение</span>${esc(t.is.topic)} ${esc(t.is.label)}</button></div>
+        ${t.is.excerpt ? `<details class="isx"><summary>Откъс към темата за интерпретативно съчинение</summary>${excerptBox("", t.is.excerpt)}<p class="muted small">* Откъсите са опора за създаването на интерпретативното съчинение, като може да се използват и други моменти от творбата.</p></details>` : ""}
+        <p class="muted small">Натисни тема, за да я напишеш в раздел „Съчинения“ и да я провериш по критериите. Тази задача не влиза в автоматичния резултат по-долу.</p></div>`;
+      return "";
+    };
+    const part = (from, to) => exam.tasks.filter((t) => t.n >= from && t.n <= to && t.kind !== "write");
+    const R = exam.reading;
     host.innerHTML = `
-      <form class="mock" id="mockf">
-        <h2>Пробен изпит</h2>
-        <p class="muted">Отговори на всичко и натисни „Предай“ най-долу. Задачите с избираем отговор се проверяват веднага, а свободните отговори — с AI проверка.</p>
-        <h3 class="part">Част 1 · Избираем отговор</h3>
-        ${mcq.map((q) => { n++; return `<fieldset class="mq" data-i="${n - 1}"><legend><span class="num">${n}.</span> ${esc(q.q)} <span class="q-src" hidden>${esc(q.src)}</span></legend>${q.order.map((k, j) => `<label class="mopt"><input type="radio" name="m${n - 1}" value="${k}"><span class="letter">${"АБВГД"[j]}</span> ${esc(q.o[k])}</label>`).join("")}</fieldset>`; }).join("")}
-        <h3 class="part">Част 2 · Редактиране</h3>
-        ${edits.map((t, i) => { n++; return `<div class="oq"><p><span class="num">${n}.</span> Препишете изречението, като поправите грешките.</p><blockquote>${esc(t.text)}</blockquote><textarea name="e${i}" rows="2"></textarea></div>`; }).join("")}
-        <h3 class="part">Част 3 · Свободен отговор</h3>
-        ${short.map((q, i) => { n++; return `<div class="oq"><p><span class="num">${n}.</span> ${esc(q.q)} <span class="q-src">${esc(q.w.author)} — „${esc(q.w.title)}“</span></p><textarea name="s${i}" rows="3" placeholder="1–2 изречения"></textarea></div>`; }).join("")}
-        ${ext.map((q, i) => { n++; return `<div class="oq"><p><span class="num">${n}.</span> ${esc(q.q)} <span class="q-src">${esc(q.w.author)} — „${esc(q.w.title)}“</span> <b>Напишете текст от 4–5 изречения.</b></p><textarea name="x${i}" rows="6"></textarea></div>`; }).join("")}
-        <h3 class="part">Задача 41</h3>
-        <div class="oq"><p>Изберете <b>една</b> от темите и напишете текст в раздел „Съчинения“:</p>
-          <div class="pair"><button type="button" class="topic-btn" data-kind="is" data-t="${esc(isT)}"><span class="eyebrow">Интерпретативно съчинение</span>${esc(isT)}</button>
-          <button type="button" class="topic-btn" data-kind="essay" data-t="${esc(esT)}"><span class="eyebrow">Есе</span>${esc(esT)}</button></div></div>
-        <div class="row"><button class="btn primary" type="submit" id="mock-submit">Предай</button></div>
+      <form class="mock" id="mockf" autocomplete="off">
+        <div class="mock-bar"><b>Пробен ДЗИ</b><span class="tnum" id="mock-clock"></span><a href="#mock-p2">Част 2</a><a href="#mock-p3">Част 3</a></div>
+        <h3 class="part">Част 1 · 60 минути · задачи 1–21</h3>
+        ${part(1, 13).map(task).join("")}
+        ${R ? `<div class="reading"><p><b>Запознайте се с текста и диаграмата и изпълнете задачите към тях (от 14. до 21. включително).</b></p>
+          <div class="text1"><p class="exhead">ТЕКСТ 1</p>${R.text1.split(/\n\s*\n/).map((p) => `<p>${esc(p)}</p>`).join("")}</div>
+          <div class="text2"><p class="exhead">ТЕКСТ 2 (ДИАГРАМА)</p>${chartSVG(R.chart)}</div></div>` : ""}
+        ${part(14, 21).map(task).join("")}
+        <h3 class="part" id="mock-p2">Част 2 · 60 минути · задачи 22–40</h3>
+        ${part(22, 40).map(task).join("")}
+        <h3 class="part" id="mock-p3">Част 3 · 120 минути · задача 41</h3>
+        ${exam.tasks.filter((t) => t.kind === "write").map(task).join("")}
+        <div class="row"><button class="btn primary" type="submit" id="mock-submit">Предай части 1 и 2</button><span class="muted small">Отговорите се пазят, докато пишеш — можеш да продължиш по-късно.</span></div>
         <div id="mock-res"></div>
       </form>`;
+    // clock
+    const clock = $("#mock-clock");
+    const tick = () => { if (!document.body.contains(clock)) return clearInterval(iv); const left = 240 * 60 - Math.floor((Date.now() - run.start) / 1000); const a = Math.abs(left); clock.textContent = `${left < 0 ? "−" : ""}${Math.floor(a / 3600)}:${String(Math.floor(a / 60) % 60).padStart(2, "0")}:${String(a % 60).padStart(2, "0")}`; clock.classList.toggle("over", left < 0); };
+    const iv = setInterval(tick, 1000); tick();
+    // autosave
+    const f = $("#mockf"); let sv;
+    f.addEventListener("input", () => { clearTimeout(sv); sv = setTimeout(() => { const r = store.get("mockRun", null); if (!r) return; const a = {}; new FormData(f).forEach((v, k) => { a[k] = String(v); }); r.ans = a; store.set("mockRun", r); }, 400); });
     $$(".topic-btn", host).forEach((b) => b.onclick = () => { store.set("writeTopic", { kind: b.dataset.kind, topic: b.dataset.t }); go("write"); });
+    $$(".mock-bar a", host).forEach((a) => a.onclick = (e) => { e.preventDefault(); $(a.getAttribute("href")).scrollIntoView({ behavior: "smooth" }); });
     host.scrollIntoView({ behavior: "smooth" });
-    $("#mockf").onsubmit = async (e) => {
-      e.preventDefault();
-      const f = e.target; let c = 0;
-      mcq.forEach((q, i) => {
-        const v = f.querySelector(`input[name=m${i}]:checked`);
-        const fs = f.querySelector(`fieldset[data-i="${i}"]`);
-        const ok = v && +v.value === q.a; if (ok) c++;
-        if (v) record(q, ok);
-        const qs2 = fs.querySelector(".q-src"); if (qs2) qs2.hidden = false;
-        $$("label", fs).forEach((l) => { const k = +l.querySelector("input").value; if (k === q.a) l.classList.add("right"); else if (v && k === +v.value) l.classList.add("wrong"); });
-      });
-      const res = $("#mock-res");
-      res.innerHTML = `<div class="grade-card"><div class="grade-num tnum">${c}<small>/22</small></div><div><div class="grade-name">Част 1</div><div class="muted">верни отговора с избираем отговор</div></div></div><div id="mock-ai" class="thinking">Проверявам свободните отговори…</div>`;
-      const items = [
-        ...edits.map((t, i) => ({ type: "Редактиране", task: "Поправете грешките: " + t.text, key: t.fixed + " (" + t.note + ")", ans: f[`e${i}`].value, max: 2 })),
-        ...short.map((q, i) => ({ type: "Кратък отговор", task: q.q + ` [${q.w.author} — „${q.w.title}“]`, key: q.key, ans: f[`s${i}`].value, max: 2 })),
-        ...ext.map((q, i) => ({ type: "Разширен отговор (4–5 изречения)", task: q.q + ` [${q.w.author} — „${q.w.title}“]`, key: q.key, ans: f[`x${i}`].value, max: 4 }))
-      ];
-      const mk = $("#mock-ai");
-      const mcqItems = mcq.map((q, i) => { const v = f.querySelector(`input[name=m${i}]:checked`); return { q: q.q, o: q.o, a: q.a, c: v ? +v.value : null, e: q.e, src: q.src, w: q.workId }; });
-      const saveMock = (extra) => logHistory({ t: "mock", title: "Пробна матура", score: c + (extra ? extra.tot : 0), max: 22 + (extra ? extra.max : 0), grade: grade((c + (extra ? extra.tot : 0)) / (22 + (extra ? extra.max : 0))).value, items: mcqItems, open: items.map((it, i) => ({ ...it, r: extra && extra.r[i] })), topics: { is: isT, essay: esT } });
-      $("#mock-submit").disabled = true;
-      try {
-        const prompt = `${TEACHER}
+    f.onsubmit = (e) => { e.preventDefault(); gradeExam(f, exam, run); };
+  }
 
-Провери свободните отговори от пробен ДЗИ. За всяка задача дай точки (0 до max), кратък коментар и верния отговор. Празен отговор = 0 точки.
-${items.map((it, i) => `#${i + 1} [${it.type}, max ${it.max}]\nЗАДАЧА: ${it.task}\nОПОРА: ${it.key}\nОТГОВОР: """${(it.ans || "").slice(0, 2000)}"""`).join("\n\n")}
-
-Отговори само с JSON масив в същия ред: [{"score":число,"comment":"едно-две изречения","correct":"верният/примерният отговор накратко"}]`;
-        const r = await askJSON(prompt, { modelTier: "default", cache: false });
-        let tot = 0, max = 0;
-        const rows = items.map((it, i) => { const x = (Array.isArray(r) && r[i]) || {}; const s = Math.max(0, Math.min(it.max, +x.score || 0)); tot += s; max += it.max; return `<li><p class="q-src">${esc(it.type)} · <b class="tnum">${s}/${it.max}</b></p><p><b>${esc(it.task)}</b></p>${it.ans ? `<p class="yours">${esc(it.ans)}</p>` : `<p class="muted">Без отговор</p>`}<p>${esc(x.comment || "")}</p><p class="keyline">${esc(x.correct || it.key)}</p></li>`; });
-        const pct = (c + tot) / (22 + max);
-        saveMock({ tot, max, r: items.map((it, i) => { const x = (Array.isArray(r) && r[i]) || {}; return { score: Math.max(0, Math.min(it.max, +x.score || 0)), comment: x.comment, correct: x.correct }; }) });
-        mk.className = "";
-        mk.innerHTML = `<div class="grade-card"><div class="grade-num tnum">${tot}<small>/${max}</small></div><div><div class="grade-name">Части 2 и 3</div><div class="muted">Общо без задача 41: ${Math.round(pct * 100)}% · приблизително ${grade(pct).value}</div></div></div><ol class="review">${rows.join("")}</ol>`;
-      } catch (er) {
-        saveMock(null);
-        mk.className = "";
-        mk.innerHTML = `${offline(er) ? copyForAI("Свободните отговори не са проверени автоматично.") + `<p class="muted">Верните отговори за самопроверка:</p>` : `<p class="warn">${aiErr(er)}</p>`}<ol class="review">${items.map((it) => `<li><p><b>${esc(it.task)}</b></p>${it.ans ? `<p class="yours">${esc(it.ans)}</p>` : ""}<p class="keyline">${esc(it.key)}</p></li>`).join("")}</ol>`;
+  // ----- grading -----
+  function punctScore(t, key, answer) {
+    // words with the punctuation that follows them; a free-standing mark (e.g. a dash) joins the previous word
+    const tok = (s) => { const out = []; String(s).trim().split(/\s+/).forEach((w) => { if (out.length && !/[а-яa-zѝ0-9]/i.test(w)) out[out.length - 1] += w; else if (w) out.push(w); }); return out; };
+    const bare = (w) => w.replace(/[^а-яa-zѝ0-9]/gi, "").toLowerCase();
+    const K = tok(key), G = tok(t), A = tok(answer || "");
+    if (K.map(bare).join(" ") !== A.map(bare).join(" ") || K.length !== G.length) return null;
+    let s = 0; K.forEach((k, i) => { if (k !== G[i] && A[i] === k) s++; });
+    let extra = 0; A.forEach((a, i) => { if (K[i] === G[i] && a !== K[i]) extra++; });
+    return Math.max(0, Math.min(5, s - extra));
+  }
+  function gradeExam(f, exam, run) {
+    const fd = (k) => (f.elements[k] && f.elements[k].value) || "";
+    let auto = 0; const items = [], open = [];
+    exam.tasks.forEach((t) => {
+      const box = f.querySelector(`[data-n="${t.n}"]`);
+      if (t.kind === "mcq") {
+        const v = f.querySelector(`input[name=q${t.n}]:checked`), c = v ? +v.value : null, ok = c === t.a;
+        if (ok) auto++;
+        items.push({ q: `${t.n}. ${t.q}`, o: t.o, a: t.a, c, e: t.e, src: t.src });
+        $$("label", box).forEach((l) => { const k = +l.querySelector("input").value; if (k === t.a) l.classList.add("right"); else if (k === c) l.classList.add("wrong"); });
+      } else if (t.kind === "short") {
+        const g = normA(fd("q" + t.n));
+        const ok = !!g && t.a.some((x) => { const a = normA(x); return g === a || (t.contains && (g.includes(a) || (a.includes(g) && g.length > 3))); });
+        const sc = ok ? t.pts : 0; auto += sc;
+        open.push({ type: `${t.n}. Кратък отговор`, task: (t.instr || "") + (t.s ? " " + t.s : ""), max: t.pts, ans: fd("q" + t.n), key: t.a.join(" / "), r: { score: sc, correct: t.a[0], comment: t.e } });
+        box.insertAdjacentHTML("beforeend", `<p class="fb ${ok ? "ok" : "no"}"><b>${sc}/${t.pts} т.</b> ${ok ? "Вярно." : `Верен отговор: <b>${esc(t.a[0])}</b>.`} <span class="muted">${esc(t.e)}</span></p>`);
+      } else if (t.kind === "punct") {
+        const sc = punctScore(t.t, t.key, fd("q" + t.n));
+        if (sc != null) auto += sc;
+        open.push({ type: `${t.n}. Пунктуация`, task: t.t, max: 5, ans: fd("q" + t.n), key: t.key, r: sc != null ? { score: sc, correct: t.key, comment: t.e } : null, self: sc == null });
+        box.insertAdjacentHTML("beforeend", `<p class="fb ${sc === 5 ? "ok" : "no"}">${sc != null ? `<b>${sc}/5 т.</b>` : `<b>Текстът е променен</b> — сравни сам и си дай точки по-долу.`} Правилно: <span class="keyline">${esc(t.key)}</span> <span class="muted">${esc(t.e)}</span></p>`);
+      } else if (t.kind === "gaps") {
+        let sc = 0; Object.keys(t.a).forEach((g) => { if (fd("q" + t.n + g) === t.a[g]) sc++; }); auto += sc;
+        open.push({ type: `${t.n}. Уместна дума`, task: t.t, max: 3, ans: Object.keys(t.a).map((g) => `(${g}) ${fd("q" + t.n + g)}`).join(", "), key: Object.keys(t.a).map((g) => `(${g}) ${t.a[g]}`).join(", "), r: { score: sc, correct: Object.keys(t.a).map((g) => `(${g}) ${t.a[g]}`).join(", "), comment: t.e } });
+        box.insertAdjacentHTML("beforeend", `<p class="fb ${sc === 3 ? "ok" : "no"}"><b>${sc}/3 т.</b> Правилно: ${Object.keys(t.a).map((g) => `(${g}) <b>${esc(t.a[g])}</b>`).join(", ")}. <span class="muted">${esc(t.e)}</span></p>`);
+      } else if (t.kind === "match") {
+        let sc = 0; t.works.forEach((w, i) => { const k = fd("q" + t.n + i); if (k !== "" && t.authors[+k] === t.a[i]) sc++; }); auto += sc;
+        const corr = t.works.map((w, i) => `„${w}“ — ${t.a[i]}`).join("; ");
+        open.push({ type: `${t.n}. Автор и творба`, task: "Свържете заглавията с авторите.", max: 3, ans: t.works.map((w, i) => { const k = fd("q" + t.n + i); return `${"АБВ"[i]}) ${k === "" ? "—" : +k + 1}`; }).join(", "), key: corr, r: { score: sc, correct: corr } });
+        box.insertAdjacentHTML("beforeend", `<p class="fb ${sc === 3 ? "ok" : "no"}"><b>${sc}/3 т.</b> ${esc(corr)}</p>`);
+      } else if (t.kind === "open") {
+        open.push({ type: `${t.n}. Свободен отговор`, task: t.instr, max: t.pts, ans: fd("q" + t.n), key: t.key, self: true, n: t.n });
       }
-      res.scrollIntoView({ behavior: "smooth" });
+    });
+    const selfItems = open.filter((o) => o.self);
+    const autoMax = exam.tasks.filter((t) => t.kind !== "write" && t.kind !== "passage" && !(t.kind === "open")).reduce((s, t) => s + (t.pts || 0), 0);
+    $("#mock-submit").disabled = true;
+    const res = $("#mock-res");
+    res.innerHTML = `
+      <div class="grade-card"><div class="grade-num tnum" id="mk-total">${auto}<small>/70</small></div><div><div class="grade-name">Части 1 и 2</div><div class="muted" id="mk-sub">${auto} т. автоматично (от ${autoMax}) · свободните отговори — оцени ги по-долу</div></div></div>
+      <section class="panel selfscore"><h3>Оцени свободните отговори</h3>
+        <p class="muted">Сравни отговора си с примерния и си дай точки. На ДЗИ се приемат и други адекватни отговори, не само дословните.</p>
+        <div class="row" id="mk-ai-row"></div>
+        <ol class="review">${selfItems.map((o, i) => `<li><p class="q-src">${esc(o.type)} · до ${o.max} т.</p><p><b>${esc(o.task)}</b></p>${o.ans ? `<p class="yours">${esc(o.ans)}</p>` : `<p class="muted">Без отговор</p>`}<p class="keyline">${esc(o.key)}</p><p class="ai-c muted" id="mk-c${i}"></p><label class="fld inline"><span>Точки</span><select data-self="${i}">${Array.from({ length: o.max + 1 }, (_, p) => `<option value="${p}">${p}</option>`).join("")}</select></label></li>`).join("")}</ol>
+        <div class="row"><button class="btn primary" type="button" id="mk-save">Запиши резултата</button><span class="muted small" id="mk-saved"></span></div>
+      </section>`;
+    const total = () => auto + $$("[data-self]", res).reduce((s, el) => s + +el.value, 0);
+    const upd = () => { const t = total(); $("#mk-total").innerHTML = `${t}<small>/70</small>`; $("#mk-sub").textContent = `${auto} т. автоматично + ${t - auto} т. свободни отговори · ≈ ${grade(t / 70).value} без задача 41`; };
+    $$("[data-self]", res).forEach((el) => el.onchange = upd); upd();
+    // Claude check of open answers (only inside claude.ai) / copy for any AI chat elsewhere
+    const aiRow = $("#mk-ai-row");
+    const prompt = `${TEACHER}
+
+Провери свободните отговори от пробен ДЗИ по БЕЛ. За всяка задача дай точки (0 до max), кратък коментар и примерен верен отговор. Празен отговор = 0 точки. Приемай адекватни отговори, не само дословни.
+${selfItems.map((it, i) => `#${i + 1} [${it.type}, max ${it.max}]\nЗАДАЧА: ${it.task}\nОПОРА: ${it.key}\nОТГОВОР: """${(it.ans || "").slice(0, 2500)}"""`).join("\n\n")}
+
+Отговори само с JSON масив в същия ред: [{"score":число,"comment":"едно-две изречения"}]`;
+    if (aiState === "ready") {
+      aiRow.innerHTML = `<button class="btn" type="button" id="mk-ai">Провери свободните отговори с Claude</button>`;
+      $("#mk-ai").onclick = async () => {
+        $("#mk-ai").disabled = true; $("#mk-ai").textContent = "Проверявам…";
+        try {
+          const r = await askJSON(prompt, { modelTier: "default", cache: false });
+          selfItems.forEach((it, i) => { const x = (Array.isArray(r) && r[i]) || {}; const s = Math.max(0, Math.min(it.max, +x.score || 0)); const sel = $(`[data-self="${i}"]`, res); sel.value = String(s); $("#mk-c" + i).textContent = x.comment || ""; });
+          upd(); $("#mk-ai").textContent = "Проверено — можеш да промениш точките";
+        } catch (e) { $("#mk-ai").disabled = false; $("#mk-ai").textContent = "Провери свободните отговори с Claude"; aiRow.insertAdjacentHTML("beforeend", `<span class="warn">${aiErr(e)}</span>`); }
+      };
+    } else { lastPrompt = prompt; aiRow.innerHTML = copyForAI("Искаш ли външна проверка?"); }
+    $("#mk-save").onclick = () => {
+      const t = total();
+      selfItems.forEach((it, i) => { it.r = { score: +$(`[data-self="${i}"]`, res).value, correct: it.key, comment: $("#mk-c" + i).textContent }; });
+      const w41 = exam.tasks.find((x) => x.kind === "write");
+      logHistory({ t: "mock", title: "Пробен ДЗИ (части 1 и 2)", score: t, max: 70, grade: grade(t / 70).value, items, open, topics: w41 ? { essay: w41.essay, is: w41.is.topic } : null });
+      const r2 = store.get("mockRun", null); if (r2) { r2.done = true; store.set("mockRun", r2); }
+      $("#mk-save").disabled = true; $("#mk-saved").textContent = "Записано в историята.";
     };
+    res.scrollIntoView({ behavior: "smooth" });
   }
 
   // ---------- LANGUAGE ----------
